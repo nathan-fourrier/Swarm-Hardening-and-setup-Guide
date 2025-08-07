@@ -1,5 +1,39 @@
 # Swarm Hardening and Setup Guide
 
+## Table of Contents
+
+- [Overview](#overview)
+- [Initial Server Setup](#initial-server-setup)
+  - [Update the System](#update-the-system)
+  - [Install Required Packages](#install-required-packages)
+- [Docker Installation and Swarm Init](#docker-installation-and-swarm-init)
+  - [Install Docker Engine](#install-docker-engine)
+  - [Initialize Docker Swarm](#initialize-docker-swarm)
+- [Install and Configure ZeroTier](#install-and-configure-zerotier)
+  - [Create ZeroTier Network](#create-zerotier-network)
+  - [Install ZeroTier](#install-zerotier)
+- [Create GitLab CI Deploy User](#create-gitlab-ci-deploy-user)
+  - [Setup SSH Key for CI](#setup-ssh-key-for-ci)
+- [SSH Hardening (Tunnel-Only for CI)](#ssh-hardening-tunnel-only-for-ci)
+  - [Edit Authorized Key Format](#edit-authorized-key-format)
+- [Get Network Information (Public and ZeroTier)](#get-network-information-public-and-zerotier)
+- [Restrict SSH Access Based on Network](#restrict-ssh-access-based-on-network)
+- [Enable Docker Remote API over TLS](#enable-docker-remote-api-over-tls)
+  - [Create TLS Certificates](#create-tls-certificates)
+  - [Install Certificates](#install-certificates)
+  - [Configure Docker Daemon](#configure-docker-daemon)
+- [Configure UFW Firewall](#configure-ufw-firewall)
+- [Deploying traefik using ci](#deploying-traefik-using-ci)
+  - [Step 1: Set Up CI/CD Variables at Group Level](#step-1-set-up-cicd-variables-at-group-level)
+  - [Step 2: Create a "Runners" Project for CI Templates](#step-2-create-a-runners-project-for-ci-templates)
+  - [Step 3: Create Traefik Repository](#step-3-create-traefik-repository)
+  - [Step 4: Create Traefik Public Network](#step-4-create-traefik-public-network)
+- [Creating a New Stack with Traefik Integration](#creating-a-new-stack-with-traefik-integration)
+  - [Step 1: Create a New GitLab Repository](#step-1-create-a-new-gitlab-repository)
+  - [Step 2: Create Docker Compose File](#step-2-create-docker-compose-file)
+  - [Step 3: Create GitLab CI Configuration](#step-3-create-gitlab-ci-configuration)
+  - [Step 4: Deploy and Test](#step-4-deploy-and-test)
+
 ## Overview
 
 This guide explains how to securely set up a Docker Swarm cluster on Ubuntu servers with best practices for basic hardening, remote GitLab CI deployment, and private management access using ZeroTier and TLS-secured Docker API.
@@ -365,13 +399,13 @@ Navigate to your GitLab group settings and configure the following CI/CD variabl
 
 | Variable | Description | Type | Protected | Masked |
 |----------|-------------|------|-----------|--------|
-| `VPS_SSH_PRIVATE_KEY` | Private SSH key for secure connection to VPS | Variable | No | Yes |
-| `VPS_SSH_KNOWN_HOSTS` | SSH known hosts to prevent man-in-the-middle attacks | Variable | No | No |
+| `VPS_SSH_PRIVATE_KEY` | Private SSH key for secure connection to VPS | File | No | Yes |
+| `VPS_SSH_KNOWN_HOSTS` | SSH known hosts to prevent man-in-the-middle attacks | File | No | No |
 | `VPS_SSH_USER` | SSH username on the VPS (ci-deploy user) | Variable | No | No |
 | `VPS_IP` | Public IP address of your VPS server | Variable | No | No |
-| `DOCKER_SWARM_CA` | CA certificate for Docker TLS verification | Variable | No | Yes |
-| `RUNNER_DOCKER_CERT` | Client certificate for Docker TLS authentication | Variable | No | Yes |
-| `RUNNER_DOCKER_CERT_KEY` | Client private key for Docker TLS authentication | Variable | No | Yes |
+| `DOCKER_SWARM_CA` | CA certificate for Docker TLS verification | File | No | Yes |
+| `RUNNER_DOCKER_CERT` | Client certificate for Docker TLS authentication | File | No | Yes |
+| `RUNNER_DOCKER_CERT_KEY` | Client private key for Docker TLS authentication | File | No | Yes |
 
 
 **Security Notes:**
@@ -427,5 +461,237 @@ docker network create --driver overlay --attachable traefik-public
 
 This network will be used by Traefik to discover and route traffic to other services in your Swarm. The `--attachable` flag allows standalone containers to connect to this overlay network.
 
+---
 
+## Creating a New Stack with Traefik Integration
 
+This section demonstrates how to create a new application stack that integrates with Traefik for automatic service discovery and routing.
+
+### Step 1: Create a New GitLab Repository
+
+1. Go to your GitLab group and create a new project named "my-app" (or any name you prefer)
+2. Clone the project locally:
+
+```bash
+git clone <your-group>/my-app.git
+cd my-app
+```
+
+### Step 2: Create Docker Compose File
+
+Create a `docker-compose.yml` file in the root of your project:
+
+```yaml
+version: '3.8'
+
+services:
+  app:
+    image: nginx:alpine
+    networks:
+      - traefik-public
+    deploy:
+      mode: replicated
+      replicas: 2
+      placement:
+        constraints:
+          - node.role == worker
+      resources:
+        limits:
+          memory: 512M
+          cpu: 100m
+        requests:
+          memory: 256M
+          cpu: 50m
+      restart_policy:
+        condition: on-failure
+        delay: 5s
+        max_attempts: 3
+        window: 120s
+      update_config:
+        parallelism: 1
+        delay: 10s
+        order: start-first
+      rollback_config:
+        parallelism: 1
+        delay: 5s
+        order: stop-first
+      labels:
+        # Enable Traefik for this service
+        - "traefik.enable=true"
+        
+        # Define the router (entry point)
+        - "traefik.http.routers.my-app.rule=Host(`my-app.example.com`)"
+        - "traefik.http.routers.my-app.entrypoints=websecure"
+        - "traefik.http.routers.my-app.tls=true"
+        - "traefik.http.routers.my-app.tls.certresolver=letsencrypt"
+        
+        # Define the service
+        - "traefik.http.services.my-app.loadbalancer.server.port=80"
+        
+        # Optional: Add middleware for security headers
+        - "traefik.http.middlewares.my-app-security.headers.frameDeny=true"
+        - "traefik.http.middlewares.my-app-security.headers.contentTypeNosniff=true"
+        - "traefik.http.middlewares.my-app-security.headers.browserXssFilter=true"
+        - "traefik.http.routers.my-app.middlewares=my-app-security"
+        
+        # Optional: Add rate limiting
+        - "traefik.http.middlewares.my-app-ratelimit.ratelimit.average=100"
+        - "traefik.http.middlewares.my-app-ratelimit.ratelimit.burst=50"
+        - "traefik.http.routers.my-app.middlewares=my-app-ratelimit"
+        
+        # Health check
+        - "traefik.http.services.my-app.loadbalancer.healthcheck.path=/"
+        - "traefik.http.services.my-app.loadbalancer.healthcheck.interval=30s"
+        - "traefik.http.services.my-app.loadbalancer.healthcheck.timeout=5s"
+
+networks:
+  traefik-public:
+    external: true
+```
+
+### Step 3: Create GitLab CI Configuration
+
+Create a `.gitlab-ci.yml` file in the root of your project:
+
+```yaml
+include:
+  - project: 'your-group/runners'  # Replace with your actual project path
+    ref: main
+    file: "swarm-deployment.yml"
+
+variables:
+  STACK_NAME: "my-app"
+  COMPOSE_FILE: "docker-compose.yml"
+
+stages:
+  - build
+  - deploy
+
+build:
+  stage: build
+  image: docker:latest
+  services:
+    - docker:dind
+  before_script:
+    - docker login -u $CI_REGISTRY_USER -p $CI_REGISTRY_PASSWORD $CI_REGISTRY
+  script:
+    - docker build -t $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA .
+    - docker build -t $CI_REGISTRY_IMAGE:latest .
+    - docker push $CI_REGISTRY_IMAGE:$CI_COMMIT_SHA
+    - docker push $CI_REGISTRY_IMAGE:latest
+  only:
+    - main
+
+deploy:
+  stage: deploy
+  extends: .deploy_to_swarm
+  variables:
+    STACK_NAME: "my-app"
+    COMPOSE_FILE: "docker-compose.yml"
+  only:
+    - main
+  environment:
+    name: production
+    url: https://my-app.example.com
+```
+
+### Step 4: Create a Simple Application (Optional)
+
+If you want to build a custom application instead of using nginx, create a `Dockerfile`:
+
+```dockerfile
+FROM nginx:alpine
+
+# Copy custom configuration
+COPY nginx.conf /etc/nginx/nginx.conf
+
+# Copy static files
+COPY html/ /usr/share/nginx/html/
+
+# Expose port
+EXPOSE 80
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+  CMD curl -f http://localhost/ || exit 1
+```
+
+### Step 5: Deploy and Test
+
+1. **Push your changes to GitLab:**
+   ```bash
+   git add .
+   git commit -m "Initial deployment with Traefik integration"
+   git push origin main
+   ```
+
+2. **Monitor the deployment:**
+   - Go to your GitLab project → CI/CD → Pipelines
+   - Watch the build and deploy stages
+   - Check for any errors in the logs
+
+3. **Verify the deployment:**
+   ```bash
+   # Check if the stack is running
+   docker stack ls
+   
+   # Check service status
+   docker service ls
+   
+   # Check service logs
+   docker service logs my-app_app
+   ```
+
+4. **Test the application:**
+   - Open your browser and navigate to `https://my-app.example.com`
+   - The application should be accessible through HTTPS with automatic SSL certificates
+
+### Important Traefik Labels Explained
+
+| Label | Purpose | Example |
+|-------|---------|---------|
+| `traefik.enable=true` | Enables Traefik for this service | Always set to `true` |
+| `traefik.http.routers.{name}.rule` | Defines routing rule | `Host('my-app.example.com')` |
+| `traefik.http.routers.{name}.entrypoints` | Specifies entry point | `websecure` (HTTPS) |
+| `traefik.http.routers.{name}.tls` | Enables TLS | `true` |
+| `traefik.http.routers.{name}.tls.certresolver` | SSL certificate resolver | `letsencrypt` |
+| `traefik.http.services.{name}.loadbalancer.server.port` | Service port | `80` |
+| `traefik.http.middlewares.{name}-security.headers.*` | Security headers | Various security settings |
+| `traefik.http.middlewares.{name}-ratelimit.ratelimit.*` | Rate limiting | Limit requests per second |
+
+### Common Traefik Rules
+
+```yaml
+# Single domain
+- "traefik.http.routers.my-app.rule=Host(`my-app.example.com`)"
+
+# Multiple domains
+- "traefik.http.routers.my-app.rule=Host(`my-app.example.com`) || Host(`www.my-app.example.com`)"
+
+# Path-based routing
+- "traefik.http.routers.my-app.rule=Host(`example.com`) && PathPrefix(`/api`)"
+
+# Subdomain routing
+- "traefik.http.routers.my-app.rule=HostRegexp(`{subdomain:[a-z]+}.example.com`)"
+
+# Port-based routing
+- "traefik.http.routers.my-app.rule=Host(`my-app.example.com`) && Port(`8080`)"
+```
+
+### Troubleshooting
+
+1. **Service not accessible:**
+   - Check if the service is running: `docker service ls`
+   - Verify Traefik labels are correct
+   - Check Traefik logs: `docker service logs traefik_traefik`
+
+2. **SSL certificate issues:**
+   - Ensure your domain points to the server IP
+   - Check Let's Encrypt rate limits
+   - Verify DNS propagation
+
+3. **Network connectivity:**
+   - Ensure the service is connected to `traefik-public` network
+   - Check if Traefik is running: `docker stack services traefik`
+
+This completes the setup of a new stack with Traefik integration. Your application will now be automatically discovered by Traefik and accessible through HTTPS with automatic SSL certificate management.
