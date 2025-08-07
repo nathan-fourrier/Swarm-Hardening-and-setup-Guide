@@ -25,22 +25,20 @@ version: '3.8'
 services:
   portainer:
     image: portainer/portainer-ce:latest
-    command: -H tcp://tasks.agent:9001 --tlsskipverify
+    command: -H unix:///var/run/docker.sock
     ports:
       - 9000:9000
     volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
       - portainer_data:/data
-    networks:
-      - portainer
     deploy:
       mode: replicated
       replicas: 1
       placement:
         constraints:
           - node.role == manager
-      labels:
-        - portainer.agent=true
-        - traefik.enable=false
+    networks:
+      - portainer
 
 volumes:
   portainer_data:
