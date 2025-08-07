@@ -12,6 +12,8 @@ It covers:
 - Restricting management to a ZeroTier private network
 - Configuring UFW firewall
 - SSL/TLS setup for Docker Remote API
+- Setting up traefik
+- Setting up portainer
 
 > Disclaimer: This is a baseline guide. You should adapt hardening and firewall rules to your specific threat model and deployment requirements.
 
@@ -56,6 +58,34 @@ docker swarm init
 
 ## Install and Configure ZeroTier
 
+### Create ZeroTier Network
+
+Before installing ZeroTier on your servers, you need to create a private network through the ZeroTier web interface:
+
+1. **Sign up/Login to ZeroTier Central**
+   - Go to [my.zerotier.com](https://my.zerotier.com)
+   - Create an account or login to your existing account
+
+2. **Create a New Network**
+   - Click "Create" or "Create Network"
+   - Choose "Private Network" (recommended for security)
+   - Give your network a descriptive name (e.g., "Docker Swarm Management")
+
+3. **Configure Network Settings**
+   - **Network ID**: Note the 16-character network ID (e.g., `8056c2e21c000001`)
+   - **Access Control**: Set to "Private" for enhanced security
+   - **IPv4 Auto-Assign**: Enable and configure your desired subnet (e.g., `10.0.0.0/24`)
+   - **IPv6 Auto-Assign**: Optional, can be disabled if not needed
+
+4. **Advanced Settings** (Optional)
+   - **Route Management**: Enable if you want ZeroTier to manage routes
+   - **Bridge Mode**: Disable unless you need to bridge to physical networks
+   - **DNS**: Configure custom DNS servers if needed
+
+5. **Save the Network**
+   - Click "Save" to create your network
+   - Keep the Network ID handy - you'll need it for joining servers
+
 ### Install ZeroTier
 
 ```bash
@@ -63,6 +93,8 @@ curl -s https://install.zerotier.com | sudo bash
 sudo systemctl enable --now zerotier-one
 sudo zerotier-cli join <your-network-id>
 ```
+
+> **Note**: Replace `<your-network-id>` with the 16-character network ID from step 3 above.
 
 ---
 
@@ -209,6 +241,15 @@ echo extendedKeyUsage = serverAuth >> extfile.cnf
 
 openssl x509 -req -days 365 -sha256 -in server.csr -CA ca.pem -CAkey ca-key.pem \
   -CAcreateserial -out server-cert.pem -extfile extfile.cnf
+
+# Client cert
+openssl genrsa -out client-key.pem 4096
+openssl req -subj '/CN=client' -new -key client-key.pem -out client.csr
+
+echo extendedKeyUsage = clientAuth > extfile-client.cnf
+
+openssl x509 -req -days 365 -sha256 -in client.csr -CA ca.pem -CAkey ca-key.pem \
+  -CAcreateserial -out client-cert.pem -extfile extfile-client.cnf
 ```
 
 > Note:
@@ -216,7 +257,9 @@ openssl x509 -req -days 365 -sha256 -in server.csr -CA ca.pem -CAkey ca-key.pem 
 > - ca.pem: Public CA cert
 > - server-key.pem: Docker server key
 > - server-cert.pem: Docker server cert
-> - server.csr, ca.srl, extfile.cnf: optional to delete
+> - key.pem – Client private key (keep safe)
+> - cert.pem – Client certificate
+> - server.csr, ca.srl, extfile.cnf, extfile-client.cnf, client.csr: optional to delete
 
 ### Install Certificates
 
@@ -296,14 +339,93 @@ ufw status verbose
 
 ---
 
-## Final Checklist
+## Deploying traefik using ci
 
-| Step                        | Status |
-|-----------------------------|--------|
-| System updated              | ✅      |
-| Docker installed & swarm    | ✅      |
-| ZeroTier joined             | ✅      |
-| CI user created             | ✅      |
-| SSH restricted properly     | ✅      |
-| Docker TLS API enabled      | ✅      |
-| Firewall configured         | ✅      |
+We are going to setup the traefik stack using a gitlab repo and ci to check the full process of deployment
+
+### Step 1: Set Up CI/CD Variables at Group Level
+
+Navigate to your GitLab group settings and configure the following CI/CD variables:
+
+#### Required Variables:
+
+**SSH Connection Variables:**
+- `VPS_SSH_PRIVATE_KEY`: Private SSH key for connecting to your VPS (the private key corresponding to the public key added to ci-deploy user)
+- `VPS_SSH_KNOWN_HOSTS`: SSH known hosts file content for your VPS (run `ssh-keyscan -H your-vps-ip` to get this)
+- `VPS_SSH_USER`: SSH username on your VPS (should be `ci-deploy`)
+- `VPS_IP`: Public IP address of your VPS
+
+**Docker TLS Certificate Variables:**
+- `DOCKER_SWARM_CA`: Content of the CA certificate file (`ca.pem`) - used to verify the Docker daemon's TLS certificate
+- `RUNNER_DOCKER_CERT`: Content of the client certificate file (`client-cert.pem`) - used for client authentication to Docker daemon
+- `RUNNER_DOCKER_CERT_KEY`: Content of the client private key file (`client-key.pem`) - used for client authentication to Docker daemon
+
+
+#### Variable Descriptions:
+
+| Variable | Description | Type | Protected | Masked |
+|----------|-------------|------|-----------|--------|
+| `VPS_SSH_PRIVATE_KEY` | Private SSH key for secure connection to VPS | Variable | No | Yes |
+| `VPS_SSH_KNOWN_HOSTS` | SSH known hosts to prevent man-in-the-middle attacks | Variable | No | No |
+| `VPS_SSH_USER` | SSH username on the VPS (ci-deploy user) | Variable | No | No |
+| `VPS_IP` | Public IP address of your VPS server | Variable | No | No |
+| `DOCKER_SWARM_CA` | CA certificate for Docker TLS verification | Variable | No | Yes |
+| `RUNNER_DOCKER_CERT` | Client certificate for Docker TLS authentication | Variable | No | Yes |
+| `RUNNER_DOCKER_CERT_KEY` | Client private key for Docker TLS authentication | Variable | No | Yes |
+
+
+**Security Notes:**
+- Mark sensitive variables (passwords, keys, certificates) as "Masked" to prevent them from appearing in job logs
+- Consider marking production variables as "Protected" if you have separate environments
+- Store the actual certificate and key files securely and copy their contents into the variables
+
+### Step 2: Create a "Runners" Project for CI Templates
+
+First, create a new GitLab project called "runners" (or any name you prefer) to store your CI/CD templates. This project will serve as a central repository for reusable CI configurations.
+
+1. Go to your GitLab group and create a new project named "runners"
+2. Clone the project locally
+3. Copy the `swarm-deployment.yml` template to this project:
+
+```bash
+git clone <your-group>/runners.git
+cd runners
+# Copy the swarm-deployment.yml from this guide's assets/config/ directory
+```
+
+The `swarm-deployment.yml` file contains reusable CI/CD templates that define:
+- Build stages for Docker images
+- Deploy stages for Docker Swarm stacks
+- SSH tunnel setup for secure remote deployment
+- Docker TLS certificate handling
+
+### Step 3: Create Traefik Repository
+
+Create a new GitLab project for your Traefik deployment:
+
+1. Create a new project named "traefik" in your GitLab group
+2. Clone the project locally
+3. Copy the `traefik_stack.yml` in the folder stacks of your traefik project (and edit fields for your domain name)
+4. Copy the `traefik.gitlab-ci.yml` as `gitlab-ci.yml` in the root of your traefik project
+5. Update the include section to reference your actual runners project:
+
+```yaml
+include:
+  - project: 'your-group/runners'  # Replace with your actual project path
+    ref: main
+    file: "swarm-deployment.yml"
+```
+
+### Step 4: Create Traefik Public Network
+
+In the specific case of traefik, before deploying the stack, you need to create the `traefik-public` network that Traefik will use to communicate with other services:
+
+```bash
+# Create the traefik-public network
+docker network create --driver overlay --attachable traefik-public
+```
+
+This network will be used by Traefik to discover and route traffic to other services in your Swarm. The `--attachable` flag allows standalone containers to connect to this overlay network.
+
+
+

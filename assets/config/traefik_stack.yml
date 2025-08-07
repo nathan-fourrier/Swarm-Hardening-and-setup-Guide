@@ -1,0 +1,43 @@
+version: '3.8'
+
+services:
+  traefik:
+    image: traefik:latest
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - traefik-public
+    command:
+      - --providers.swarm=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      - --entrypoints.websecure.address=:443
+      # - --api.dashboard=true
+      - --log.level=DEBUG
+      - --certificatesresolvers.certbot.acme.tlschallenge=true
+      - --certificatesresolvers.certbot.acme.caserver=https://acme-v02.api.letsencrypt.org/directory
+      - --certificatesresolvers.certbot.acme.email=postmaster@yourdomain.com
+      - --certificatesresolvers.certbot.acme.storage=/letsencrypt/acme-v2.json
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik-certificates:/letsencrypt
+    deploy:
+      placement:
+        constraints:
+          - node.role == manager
+      # labels:
+      #   - "traefik.enable=true"
+      #   - "traefik.http.routers.traefik.rule=Host(`traefik.yourdomain.com`)" 
+      #   - "traefik.http.routers.traefik.service=api@internal"
+      #   - "traefik.http.routers.traefik.entrypoints=websecure"
+      #   - "traefik.http.routers.traefik.tls.certresolver=certbot"
+      #   - "traefik.http.services.dummy-svc.loadbalancer.server.port=9999"
+
+networks:
+  traefik-public:
+    external: true
+
+volumes:
+  traefik-certificates:

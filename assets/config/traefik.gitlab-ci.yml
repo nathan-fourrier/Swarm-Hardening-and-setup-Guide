@@ -1,0 +1,22 @@
+include:
+  - project: 'project/containing/template'
+    ref: main
+    file: "swarm-deployment.yml"
+
+build:
+  variables:
+    tag: ":dev"
+  extends: .build_docker
+  rules:
+    - if: $CI_COMMIT_BRANCH == "main"
+      exists:
+        - Dockerfile
+
+
+
+deploy_traefik:
+  extends: .deploy_docker
+  variables:
+    STACK_FILE: "stacks/traefik_stack.yml"
+    STACK_NAME: "traefik"
+
