@@ -1,189 +1,126 @@
-# Swarm Hardening and setup Guide
+🛡️ Swarm Hardening and Setup Guide
+📘 Overview
+This guide explains how to securely set up a Docker Swarm cluster on Ubuntu servers with best practices for basic hardening, remote GitLab CI deployment, and private management access using ZeroTier and TLS-secured Docker API.
 
-## Update the server
+It covers:
 
-``` bash
+🔐 Hardening SSH and limiting remote access
+
+🐳 Setting up Docker and initializing Swarm
+
+🌐 Enabling GitLab CI to deploy over SSH tunnel + TLS
+
+🧑‍💻 Restricting management to a ZeroTier private network
+
+🛡️ Configuring UFW firewall
+
+📜 SSL/TLS setup for Docker Remote API
+
+⚠️ Disclaimer: This is a baseline guide. You should adapt hardening and firewall rules to your specific threat model and deployment requirements.
+
+![Diagram of the architecutre](https://gitlab.com/bytemakers/swarm-hardening-and-setup-guide/assets/images/cx-diagram.svg)
+
+
+🛠️ Initial Server Setup
+✅ Update the System
+bash
+Copy
+Edit
 sudo apt update && sudo apt upgrade -y
-```
-
-## Install fail2ban
-
-``` bash
+✅ Install Required Packages
+bash
+Copy
+Edit
 sudo apt install -y curl gnupg2 ca-certificates lsb-release ufw fail2ban
-```
-
-## Install Docker
-
-``` bash
+🐳 Docker Installation and Swarm Init
+✅ Install Docker Engine
+bash
+Copy
+Edit
 curl -fsSL https://get.docker.com -o get-docker.sh
 sh get-docker.sh
-```
-
-``` bash
 sudo apt install docker-compose-plugin -y
-```
-
-``` bash
 sudo usermod -aG docker $USER
-```
-
-## Init swarm
-
-``` bash
+✅ Initialize Docker Swarm
+bash
+Copy
+Edit
 docker swarm init
-```
-
-## Install zerotier
-
-```bash
-url -s https://install.zerotier.com | sudo bash
-````
-
-``` bash
+🌐 Install and Configure ZeroTier
+✅ Install ZeroTier
+bash
+Copy
+Edit
+curl -s https://install.zerotier.com | sudo bash
 sudo systemctl enable --now zerotier-one
-````
-
-``` bash
 sudo zerotier-cli join <your-network-id>
-````
-
-## Create deploy user
-
-```bash
+👤 Create GitLab CI Deploy User
+bash
+Copy
+Edit
 sudo adduser ci-deploy --disabled-password --gecos ""
-```
-
-```bash
 sudo usermod -aG docker ci-deploy
-```
+🔐 Setup SSH Key for CI
+Generate key pair and add the public key to the server:
 
-Create an ssh keypair for the gitlab ci to login
-```bash
+bash
+Copy
+Edit
 ssh-keygen -t rsa -b 4096 -C "ci-deploy"
-```
-
-```bash
+bash
+Copy
+Edit
 sudo mkdir -p /home/ci-deploy/.ssh
-sudo nano /home/ci-deploy/.ssh/authorized_keys # paste public key previously generated
+sudo nano /home/ci-deploy/.ssh/authorized_keys  # Paste key here
 sudo chown -R ci-deploy:ci-deploy /home/ci-deploy/.ssh
 sudo chmod 700 /home/ci-deploy/.ssh
 sudo chmod 600 /home/ci-deploy/.ssh/authorized_keys
-```
+🔐 SSH Hardening (Tunnel-Only for CI)
+✍️ Edit Authorized Key Format
+Edit /home/ci-deploy/.ssh/authorized_keys:
 
-## Hardening ssh
+text
+Copy
+Edit
+command="echo 'Tunnel only'",no-pty,no-agent-forwarding,no-X11-forwarding,permitopen="127.0.0.1:2376" ssh-rsa AAAA...
+🌍 Get Network Information (Public and ZeroTier)
+Run this script to gather interface and CIDR info:
 
-Edit /home/ci-deploy/.ssh/authorized_keys to match this format
+<details> <summary>📜 Click to View Script</summary>
+bash
+Copy
+Edit
+# (Paste the script you already have here — unchanged)
+</details>
+🛡️ Restrict SSH Access Based on Network
+🗂️ Edit: /etc/ssh/sshd_config.d/ci-deploy.conf
+text
+Copy
+Edit
+# Allow full SSH from ZeroTier
+Match Address 10.0.0.0/24  # Replace with your ZeroTier CIDR
+    AllowUsers *
 
-```
-command="echo 'Tunnel only'",no-pty,no-agent-forwarding,no-X11-forwarding,permitopen="127.0.0.1:2376" ssh-ed25519 A.....
-```
-In the next steps you will need info for public interfaces and zerotier, so execute this script to get it.
+# Allow CI user only from non-ZeroTier networks
+Match Address *,!10.0.0.0/24
+    AllowUsers ci-deploy
 
-``` bash
-#!/bin/bash
-
-# Function to calculate network CIDR from IP and prefix
-calculate_network_cidr() {
-    ip_with_prefix=$1
-
-    ip=${ip_with_prefix%/*}
-    prefix=${ip_with_prefix#*/}
-
-    IFS='.' read -r i1 i2 i3 i4 <<< "$ip"
-
-    # Convert IP to integer
-    ip_int=$(( (i1 << 24) + (i2 << 16) + (i3 << 8) + i4 ))
-
-    # Build subnet mask
-    mask=$(( 0xFFFFFFFF << (32 - prefix) & 0xFFFFFFFF ))
-
-    # Calculate network
-    network=$(( ip_int & mask ))
-
-    n1=$(( (network >> 24) & 0xFF ))
-    n2=$(( (network >> 16) & 0xFF ))
-    n3=$(( (network >> 8) & 0xFF ))
-    n4=$(( network & 0xFF ))
-
-    echo "$n1.$n2.$n3.$n4/$prefix"
-}
-
-echo "=== ZeroTier Info ==="
-zt_iface=$(ip -o link show | awk -F': ' '/zt/{print $2}' | head -n1)
-
-if [ -n "$zt_iface" ]; then
-    zt_ip_cidr=$(ip -4 addr show dev "$zt_iface" | awk '/inet / {print $2}')
-    zt_ip=${zt_ip_cidr%/*}
-    zt_network_id=$(sudo zerotier-cli listnetworks | grep "$zt_iface" | awk '{print $3}')
-    zt_network_cidr=$(calculate_network_cidr "$zt_ip_cidr")
-
-    echo "Interface   : $zt_iface"
-    echo "IP Address  : $zt_ip"
-    echo "Network CIDR: $zt_network_cidr"
-    echo "Network ID  : $zt_network_id"
-else
-    echo "No ZeroTier interface found."
-fi
-
-echo ""
-echo "=== Public Interface Info ==="
-public_iface=$(ip route get 1.1.1.1 | grep -oP 'dev \K\S+')
-
-if [ -n "$public_iface" ]; then
-    public_ip_cidr=$(ip -4 addr show dev "$public_iface" | awk '/inet / {print $2}')
-    public_ip=${public_ip_cidr%/*}
-    public_network_cidr=$(calculate_network_cidr "$public_ip_cidr")
-
-    echo "Interface   : $public_iface"
-    echo "IP Address  : $public_ip"
-    echo "Network CIDR: $public_network_cidr"
-else
-    echo "No public interface found."
-fi
-
-```
-
-The script produces output similar to the following:
-
-```bash
-=== ZeroTier Info === 
-Interface : ztmjflt6v5
-IP Address: 10.34.65.21
-Network CIDR: 10.34.65.0/24
-Network ID: 8156d2e21c7b18a1
-
-=== Public Interface Info ===
-Interface : ens6
-IP Address: 172.25.13.10
-Network CIDR: 172.25.13.10/32
-```
-
-Edit /etc/ssh/sshd_config.d/ci-deploy.conf
-
-```
-Match Address 10.0.0.0/24 # Replace by zerotier CIDR network
-        AllowUsers *
-Match Address *,!10.0.0.0/24 # Replace by zerotier CIDR network
-	AllowUsers ci-deploy
-
+# Force restrictions on CI user
 Match User ci-deploy
-        X11Forwarding no
-        AllowTcpForwarding yes
-        PermitTTY no
-        ForceCommand echo "Tunnel only"
-
-```
-## Enable docker api ssl 
-
-Create CA + Certs for daemon and client
-
-``` bash
+    X11Forwarding no
+    AllowTcpForwarding yes
+    PermitTTY no
+    ForceCommand echo "Tunnel only"
+🔒 Enable Docker Remote API over TLS (for CI Deploy)
+🧾 Create TLS Certificates
+bash
+Copy
+Edit
 mkdir -p ~/docker-certs && cd ~/docker-certs
-# Choose a strong passphrase for the CA
+
 openssl genrsa -aes256 -out ca-key.pem 4096
 openssl req -new -x509 -days 365 -key ca-key.pem -sha256 -out ca.pem
 
-# Server cert
 openssl genrsa -out server-key.pem 4096
 openssl req -subj "/CN=$(hostname)" -new -key server-key.pem -out server.csr
 
@@ -192,58 +129,35 @@ echo extendedKeyUsage = serverAuth >> extfile.cnf
 
 openssl x509 -req -days 365 -sha256 -in server.csr -CA ca.pem -CAkey ca-key.pem \
   -CAcreateserial -out server-cert.pem -extfile extfile.cnf
-```
-
-> **📄 Note: Description of Generated Files**
->
-> - **`ca-key.pem`**: Private key for the Certificate Authority (CA). **Keep this secret**.
-> - **`ca.pem`**: Public certificate for the CA. Share this with clients to verify certificates.
-> - **`ca.srl`**: Serial number tracker for the CA. Automatically created when signing certificates.
-> - **`server-key.pem`**: Private key for the Docker server. **Keep this secret**.
-> - **`server.csr`**: Certificate Signing Request for the server. Can be deleted after signing.
-> - **`server-cert.pem`**: Signed certificate for the server. Used by Docker for TLS authentication.
-> - **`extfile.cnf`**: OpenSSL config file specifying certificate extensions like `subjectAltName`. Reusable for future certs.
->
-> ✅ **Keep Safe**: `ca-key.pem`, `server-key.pem`  
-> ✅ **Server Needs**: `server-key.pem`, `server-cert.pem`, `ca.pem`  
-> ✅ **Clients Need**: `ca.pem` to verify the server  
-> 🗑️ **Optional to Delete**: `server.csr`, `ca.srl`, `extfile.cnf`
-
-
-Configure daemon
-
-```bash
+📁 Install Certificates
+bash
+Copy
+Edit
 sudo mkdir -p /etc/docker/certs
 sudo cp ca.pem server-cert.pem server-key.pem /etc/docker/certs/
 sudo chown root:root /etc/docker/certs/*
-
-# Set permissions
 sudo chmod 644 /etc/docker/certs/ca.pem
 sudo chmod 644 /etc/docker/certs/server-cert.pem
 sudo chmod 600 /etc/docker/certs/server-key.pem
-```
+🧰 Configure Docker Daemon
+Create service override:
 
-Move daemon config to json
-
-``` bash
-# Create the directory to override service config
+bash
+Copy
+Edit
 sudo mkdir -p /etc/systemd/system/docker.service.d
-
-# Create a file with base config for service
 sudo nano /etc/systemd/system/docker.service.d/override.conf
-```
-
-``` bash 
+ini
+Copy
+Edit
 [Service]
 ExecStart=
 ExecStart=/usr/bin/dockerd
-```
+Edit /etc/docker/daemon.json:
 
-```bash
-sudo nano /etc/docker/daemon.json
-```
-
-```json
+json
+Copy
+Edit
 {
   "hosts": ["unix:///var/run/docker.sock", "tcp://0.0.0.0:2376"],
   "tls": true,
@@ -252,21 +166,23 @@ sudo nano /etc/docker/daemon.json
   "tlscert": "/etc/docker/certs/server-cert.pem",
   "tlskey": "/etc/docker/certs/server-key.pem"
 }
-```
-```bash
-systemctl daemon-reload
+bash
+Copy
+Edit
+sudo systemctl daemon-reload
 sudo systemctl restart docker
-```
-## Configure firewall
+🔥 Configure UFW Firewall
+Update this script with your interfaces:
 
-Script to configure ufw
-
-```bash
+<details> <summary>📜 Click to View Script</summary>
+bash
+Copy
+Edit
 #!/bin/bash
 
 # Variables
-PUB_IFACE="ens3"                  # Replace by public inteface
-ZT_IFACE="ztr2qxgeyd"             # Replace by zerotier interface
+PUB_IFACE="ens3"         # Replace with public interface
+ZT_IFACE="ztr2qxgeyd"    # Replace with ZeroTier interface
 
 echo "[1/6] Reset UFW..."
 ufw --force reset
@@ -280,17 +196,23 @@ echo "[3/6] Allow HTTP/HTTPS on public interfaces..."
 ufw allow in on $PUB_IFACE to any port 80 proto tcp
 ufw allow in on $PUB_IFACE to any port 443 proto tcp
 
-echo "[4/6] Allow ssh..."
+echo "[4/6] Allow SSH..."
 ufw allow in on $PUB_IFACE to any port 22 proto tcp
 
-echo "[5/6] Allow all on zerotier if..."
+echo "[5/6] Allow all traffic on ZeroTier interface..."
 ufw allow in on $ZT_IFACE
 ufw allow out on $ZT_IFACE
 
 echo "[6/6] Enable UFW..."
 ufw --force enable
-
-echo "[✅] UFW configuration done."
 ufw status verbose
-
-```
+</details>
+✅ Final Checklist
+Step	Status
+System updated	✅
+Docker installed & swarm	✅
+ZeroTier joined	✅
+CI user created	✅
+SSH restricted properly	✅
+Docker TLS API enabled	✅
+Firewall configured	✅
