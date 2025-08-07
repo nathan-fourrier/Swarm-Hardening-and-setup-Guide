@@ -15,7 +15,7 @@ It covers:
 
 > Disclaimer: This is a baseline guide. You should adapt hardening and firewall rules to your specific threat model and deployment requirements.
 
-![Diagram of the Architecture](./assets/images/cx-diagram.svg)
+![Diagram of the Architecture](./assets/images/cx-diagram.png)
 
 ---
 
