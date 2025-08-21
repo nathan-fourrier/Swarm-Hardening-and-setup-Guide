@@ -27,7 +27,7 @@ services:
     image: portainer/portainer-ce:latest
     command: -H unix:///var/run/docker.sock
     ports:
-      - 9000:9000
+      - 9443:9443
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - portainer_data:/data
@@ -89,7 +89,7 @@ deploy_portainer:
    - Monitor the deployment logs
 
 3. **Access Portainer:**
-   - Navigate to `http://your-server-ip:9000`
+   - Navigate to `https://your-server-ip:9443`
    - Complete the initial setup wizard
 
 ## Initial Portainer Setup
@@ -119,10 +119,10 @@ labels:
   - traefik.http.routers.portainer.entrypoints=websecure
   - traefik.http.routers.portainer.tls=true
   - traefik.http.routers.portainer.tls.certresolver=letsencrypt
-  - traefik.http.services.portainer.loadbalancer.server.port=9000
+  - traefik.http.services.portainer.loadbalancer.server.port=9443
 ```
 
-Then access Portainer at `https://portainer.yourdomain.com` instead of `http://your-server-ip:9000`.
+Then access Portainer at `https://portainer.yourdomain.com` instead of `http://your-server-ip:9443`.
 
 ## Next Steps
 
